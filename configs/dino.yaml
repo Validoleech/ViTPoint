@@ -1,0 +1,15 @@
+train:
+  batch_size: 32
+  epochs_stage1: 5
+  epochs_stage2: 20
+  lr_backbone: 1e-5
+  lr_heads: 1e-3
+model:
+  dim_descriptor: 256
+  freeze_backbone_stage1: true
+data:
+  img_size: [224, 224]    # H, W
+  patch_size: 14          # ViT S/14
+  synthetic_len: 20000
+  coco_root: data/train2017
+  num_workers: 8
