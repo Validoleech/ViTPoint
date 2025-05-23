@@ -19,7 +19,7 @@ class COCOWarped(Dataset):
 
     def __getitem__(self, idx):
         img = cv2.imread(self.paths[idx])
-        img = cv2.resize(img, (self.W, self.H))
+        img = cv2.resize(img, (self.W, self.H), interpolation=cv2.INTER_LINEAR)
         img = img[:, :, ::-1]  # BGR->RGB
         img = torch.from_numpy(img).permute(2, 0, 1).float()/255.
 

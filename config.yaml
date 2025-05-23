@@ -1,5 +1,6 @@
 train:
-  batch_size: 32
+  batch_size: 1024
+  epochs_stage0: 2
   epochs_stage1: 5
   epochs_stage2: 20
   lr_backbone: 1e-5
@@ -11,5 +12,8 @@ data:
   img_size: [224, 224]    # H, W
   patch_size: 14          # ViT S/14
   synthetic_len: 20000
+  synthetic_root: data/synthetic_shapes
   coco_root: data/train2017
   num_workers: 8
+
+  
