@@ -1,10 +1,10 @@
 train:
-  batch_size: 1024
+  batch_size: 128
   epochs_stage0: 2
   epochs_stage1: 5
   epochs_stage2: 20
   lr_backbone: 1e-5
-  lr_heads: 1e-3
+  lr_heads: 3e-3
 model:
   dim_descriptor: 256
   freeze_backbone_stage1: true

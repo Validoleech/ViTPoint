@@ -14,14 +14,15 @@ class PersistentSynthConfig:
         "checkerboard",
         "stripes",
         "cube",
+        "random_cubes"
         "gaussian_noise",
     ])
     # how many images per primitive & split
     split_sizes: Dict[str, int] = field(default_factory=lambda:
-                                        {"train": 15_000, "val":  500, "test": 1_000})
+                                        {"train": 30_000, "val":  500, "test": 1_000})
                                         # {"train": 10, "val":  1, "test": 1}) # debug
     gen_img_size: tuple = (960, 1280)           # generation resolution
-    resize: tuple = (240, 320)                  # net input
+    resize: tuple = (224, 224)                  # net input
     patch_size: int = 14                        # ViT-S/14
     blur: int = 5                               # Gaussian blur (odd -> enabled)
     random_seed: int = 0

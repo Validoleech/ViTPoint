@@ -12,7 +12,7 @@ class HPatchesPairs(Dataset):
     and the 2nd-6th images as target.  Homographies are in 'H_1to?.txt'.
     """
 
-    def __init__(self, root="data/hpatches", img_size=(240, 320)):
+    def __init__(self, root="data/hpatches", img_size=(224, 224)):
         seqs = sorted(glob.glob(os.path.join(root, "*")))
         self.pairs = []
         self.H, self.W = img_size

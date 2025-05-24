@@ -22,7 +22,7 @@ class SuperPointViT(nn.Module):
         self.backbone = timm.create_model(
             "vit_small_patch14_dinov2.lvd142m",
             pretrained=True,
-            img_size=(240, 320),
+            img_size=(224, 224),
             num_classes=0,  # remove classifier
         )
         self.backbone.set_grad_checkpointing(enable=True)

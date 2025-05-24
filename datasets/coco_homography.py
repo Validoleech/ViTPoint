@@ -11,7 +11,7 @@ class COCOWarped(Dataset):
     """
     Returns (img, img_warped, H, warped_grid) for self-sup Stage-2.
     """
-    def __init__(self, root, img_size=(240, 320)):
+    def __init__(self, root, img_size=(224, 224)):
         self.paths = glob.glob(os.path.join(root, '*.jpg'))
         self.H, self.W = img_size
 
