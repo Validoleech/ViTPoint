@@ -135,12 +135,13 @@ def keep_points_inside(points, size):
     return points[mask, :]
 
 
-def draw_lines(img, nb_min_lines=10, nb_lines=40):
+def draw_lines(img, nb_min_lines=30, nb_max_lines=50):
     """ Draw random lines and output the positions of the endpoints
     Parameters:
-      nb_lines: maximal number of lines
+      nb_min_lines: minimal number of lines
+      nb_max_lines: maximal number of lines
     """
-    num_lines = random_state.randint(nb_min_lines, nb_lines + 1)
+    num_lines = random_state.randint(nb_min_lines, nb_max_lines + 1)
     segments = np.empty((0, 4), dtype=np.int32)
     points = np.empty((0, 2), dtype=np.int32)
     background_color = int(np.mean(img))
@@ -226,7 +227,7 @@ def angle_between_vectors(v1, v2):
     return np.arccos(np.clip(np.dot(v1_u, v2_u), -1.0, 1.0))
 
 
-def draw_multiple_polygons(img, max_sides=8, nb_polygons=15, **extra):
+def draw_multiple_polygons(img, max_sides=8, nb_polygons=20, **extra):
     """ Draw multiple polygons with a random number of corners
     and return the corner points
     Parameters:
@@ -688,6 +689,17 @@ def draw_cube(img, min_size_ratio=0.2, min_angle_rot=math.pi / 10,
     points = keep_points_inside(points, img.shape[:2])
     return points
 
+def draw_random_cubes(img, n_min=2, n_max=4):
+    corners_all = []
+    attempts = 0
+    while len(corners_all) < n_min and attempts < n_max*3:
+        pts = draw_cube(img,
+                        min_size_ratio=0.18,
+                        trans_interval=(0.3, 0.4))
+        if pts.shape[0] > 0:
+            corners_all.append(pts)
+        attempts += 1
+    return np.vstack(corners_all) if corners_all else np.empty((0, 2), np.int32)
 
 def draw_gaussian_noise(img):
     """ Apply random noise to the image """

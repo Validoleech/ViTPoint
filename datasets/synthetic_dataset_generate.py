@@ -1,3 +1,4 @@
+
 import argparse
 import os
 import cv2
@@ -31,7 +32,7 @@ def generate_single_sample(args):
         big = sdu.generate_background(size=cfg.gen_img_size)
         pts = gen_one(big, prim)
     except Exception as e:
-        print(f" ⚠️ {prim} sample {idx} failed: {e}")
+        print(f"! {prim} sample {idx} failed: {e}")
         pts = np.empty((0, 2), np.int32)
 
     if cfg.blur % 2 == 1 and cfg.blur > 0:
@@ -48,6 +49,7 @@ def generate_single_sample(args):
     pts[:, 1] *= scale_y
 
     cv2.imwrite(str(im_dir / f"{idx}.png"), small)
+    #assert pts.shape[0] >= 30, f"Too sparse: {pts.shape[0]} pts"
     np.save(str(pts_dir / f"{idx}.npy"), pts)
 
 

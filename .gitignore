@@ -1,3 +1,6 @@
 .venv
 *.pyc
 data
+*.txt
+*.pth
+*events.out*

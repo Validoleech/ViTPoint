@@ -4,9 +4,26 @@ import numpy as np
 import torch.nn.functional as F
 import kornia as K
 from tqdm import tqdm
-from utils.loss import focal_bce, info_nce
+from utils.loss import focal_bce, info_nce, nms_simple
 from torch.amp import autocast
 
+def sweep_best_thr(model, val_loader, device, n_steps=14):
+    """
+    Returns the threshold that maximises F1 on the whole validation set.
+    """
+    ts, Ps, Rs = [], [], []
+    for t in np.linspace(0.30, 0.95, n_steps):
+        m = evaluate_detector_pr(
+            model, val_loader, device=device, thr=float(t))
+        ts.append(t)
+        Ps.append(m['P'])
+        Rs.append(m['R'])
+
+    Ps = np.array(Ps)
+    Rs = np.array(Rs)
+    F1s = 2 * Ps * Rs / (Ps + Rs + 1e-9)
+    best = np.argmax(F1s)
+    return ts[best], F1s[best], Ps[best], Rs[best]
 
 def grid_to_pixel(y, x, dy, dx, patch):
     """
@@ -180,11 +197,13 @@ def val_step_stage2(model, batch, device, amp_dtype=torch.bfloat16):
     return L_det + 0.1 * L_desc
 
 
-# def val_step_stage1(model, batch, device, amp_dtype=torch.float16):
-#     img, heat = batch
-#     img, heat = img.to(device, non_blocking=True), heat.to(
-#         device, non_blocking=True)
-#     with autocast(device_type=device.type, dtype=amp_dtype):
-#         heat_pr, _ = model(img)
-#         loss = focal_bce(heat_pr, heat)
-#     return loss
+def pr_single_batch(heat_pr, heat_gt, thresh=0.5):
+    # NMS + threshold
+    det = nms_simple(heat_pr > thresh)
+    gt = (heat_gt > 0.5)
+    TP = (det & gt).sum().item()
+    FP = (det & ~gt).sum().item()
+    FN = (~det & gt).sum().item()
+    P = TP / (TP + FP + 1e-6)
+    R = TP / (TP + FN + 1e-6)
+    return P, R

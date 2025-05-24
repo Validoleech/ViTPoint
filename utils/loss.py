@@ -58,9 +58,53 @@ def l1_offset(offset_pr, offset_gt, heat_gt):
 
 def soft_nms_penalty(heat, k=3):
     """
-    Soft-NMS: penalise *secondary* peaks around each maximum.
+    Soft-NMS: penalise secondary peaks around each maximum.
     heat : sigmoid output [B,1,h,w]
     """
     maxpool = F.max_pool2d(heat, kernel_size=k, stride=1, padding=k//2)
     # positive values only where heat < neighbourhood max
     return (maxpool - heat).relu().mean()
+
+
+@torch.no_grad()
+def nms_simple(heat: torch.Tensor,
+               thresh: float = 0.5,
+               radius: int = 4) -> torch.Tensor:
+    """
+    Non-Maximum Suppression for dense corner / key-point heat-maps.
+
+    Args
+    ----
+    heat   : tensor  [..., H, W] – probability map in [0,1].
+    thresh : float   – minima score to consider a candidate.
+    radius : int     – NMS radius in pixels (3 ⇒ 7×7 window).
+
+    Returns
+    -------
+    keep : bool tensor, same spatial size as `heat`, True = keep pixel.
+    """
+    # normalise to shape  [B,1,H,W]
+    if heat.dim() == 2:                       # [H,W]
+        heat = heat.unsqueeze(0).unsqueeze(0)
+    elif heat.dim() == 3:                     # [B,H,W]
+        heat = heat.unsqueeze(1)
+    assert heat.dim() == 4, "NMS expects 4-D tensor"
+
+    heat_f = heat.float()
+    
+    mask = heat_f >= thresh
+    cand = heat_f * mask
+
+    # local max with max-pool
+    k = 2 * radius + 1
+    pad = radius
+    pooled = F.max_pool2d(cand, kernel_size=k, stride=1, padding=radius)
+
+    # 3. a pixel is a key-point if
+    # 1) it survived the threshold &
+    # 2) it equals the local max
+    keep = (cand == pooled) & mask
+
+    # squeeze back to original dims
+    keep = keep.squeeze(1)              # [B,1,H,W] → [B,H,W]
+    return keep.bool()
