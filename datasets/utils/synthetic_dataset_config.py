@@ -4,6 +4,10 @@ from typing import Dict, List
 
 @dataclass
 class PersistentSynthConfig:
+    """
+    Configuration for synthetic image generation, including dataset paths,
+    primitive types, split sizes, image resolutions, and augmentation parameters.
+    """
     data_root: str = "data/synthetic"
     primitives: List[str] = field(default_factory=lambda: [
         "lines",
@@ -14,8 +18,8 @@ class PersistentSynthConfig:
         "checkerboard",
         "stripes",
         "cube",
-        "random_cubes"
-        "gaussian_noise",
+        "random_cubes",
+        "gaussian_noise"
     ])
     # how many images per primitive & split
     split_sizes: Dict[str, int] = field(default_factory=lambda:

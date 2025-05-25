@@ -15,15 +15,49 @@ rng = np.random.RandomState(cfg.random_seed)
 sdu.set_random_state(rng)
 
 
-def gen_one(img, primitive):
+def gen_one(img: np.ndarray, primitive: str) -> np.ndarray:
+    """
+    Generates a single geometric primitive on the given image using the
+    synthetic drawing utility module `sdu`. Requires `draw_' as a start of the name function.
+
+    Args:
+        img (np.ndarray): The input image (background) on which to draw the primitive.
+                          Expected to be a NumPy array representing an image.
+        primitive (str): The name of the primitive to draw (e.g., "line", "circle").
+                         This name corresponds to a function in the `sdu` module
+                         like `draw_line`, `draw_circle`.
+
+    Returns:
+        np.ndarray: A NumPy array of shape `(N, 2)` containing the (x, y) coordinates
+                    of the points generated for the primitive.
+                    Returns an empty array if no points are generated or an error occurs.
+
+    Raises:
+        ValueError: If a drawing function corresponding to the `primitive` name
+                    (e.g., `draw_line` for `primitive="line"`) is not found
+                    in the `synthetic_drawing_utils` module (`sdu`).
+    """
     fn_name = f"draw_{primitive}"
     if not hasattr(sdu, fn_name):
         raise ValueError(f"synthetic_drawing_utils missing {fn_name}()")
     return getattr(sdu, fn_name)(img)
 
 
-def generate_single_sample(args):
-    prim, split, idx = args
+def generate_single_sample(prim: str, split: str, idx: int) -> None:
+    """
+    Generates a single synthetic data sample. This involves drawing a primitive,
+    applying transformations (blur, resize), scaling the corresponding points,
+    and saving the resulting image and point data to disk.
+
+    Args:
+        prim (str): The name of the primitive to generate (e.g., "line", "circle").
+        split (str): The dataset split (e.g., "train", "val", "test").
+        idx (int): The unique index for the current sample within its split.
+
+    Returns:
+        None: The function saves the generated image and points directly to disk in
+              the configured directories.
+    """
     base = Path(cfg.data_root)
     im_dir = base / prim / "images" / split
     pts_dir = base / prim / "points" / split
@@ -53,7 +87,24 @@ def generate_single_sample(args):
     np.save(str(pts_dir / f"{idx}.npy"), pts)
 
 
-def generate_all(force=False):
+def generate_all(force: bool = False) -> None:
+    """
+    Orchestrates the generation of all synthetic data samples for all
+    specified primitives and splits defined in the configuration.
+
+    Existing data for a primitive/split will be skipped if `force` is False
+    and the expected number of images already exist.
+
+    Args:
+        force (bool): If True, overwrites existing data and regenerates all samples,
+                      regardless of whether they already exist. If False, skips
+                      generation for primitives and splits that already have the
+                      expected number of images. Defaults to False.
+
+    Returns:
+        None: This function manages the generation process and saves files to disk.
+    """
+
     base = Path(cfg.data_root)
 
     for prim in cfg.primitives:

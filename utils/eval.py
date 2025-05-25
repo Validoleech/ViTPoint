@@ -1,13 +1,12 @@
-# SPDX-License-Identifier: MIT
 import torch
 import numpy as np
 import torch.nn.functional as F
 import kornia as K
 from tqdm import tqdm
-from utils.loss import focal_bce, info_nce, nms_simple
+from utils.loss import focal_bce, info_nce, _nms
 from torch.amp import autocast
 
-def sweep_best_thr(model, val_loader, device, n_steps=14):
+def sweep_best_thr(model, val_loader, device, n_steps=14, verbose=False):
     """
     Returns the threshold that maximises F1 on the whole validation set.
     """
@@ -18,7 +17,8 @@ def sweep_best_thr(model, val_loader, device, n_steps=14):
         ts.append(t)
         Ps.append(m['P'])
         Rs.append(m['R'])
-
+        if verbose:
+            print(f"Evaluated model with threshold {t}")
     Ps = np.array(Ps)
     Rs = np.array(Rs)
     F1s = 2 * Ps * Rs / (Ps + Rs + 1e-9)
@@ -162,7 +162,7 @@ def evaluate_repeatability(model, loader, thr=3, dist=4, device="cuda"):
     return {"repeatability": np.mean(rep_list)}
 
 
-def val_step_stage01(model, batch, device, amp_dtype=torch.float16):
+def val_step(model, batch, device, amp_dtype=torch.float16):
     img, heat, _ = batch
     img = img.to(device, non_blocking=True)
     heat = heat.to(device, non_blocking=True)
@@ -197,13 +197,20 @@ def val_step_stage2(model, batch, device, amp_dtype=torch.bfloat16):
     return L_det + 0.1 * L_desc
 
 
-def pr_single_batch(heat_pr, heat_gt, thresh=0.5):
+def pr_single_batch(heat_pr, heat_gt, thresh=0.5, topk=256):
     # NMS + threshold
-    det = nms_simple(heat_pr > thresh)
-    gt = (heat_gt > 0.5)
-    TP = (det & gt).sum().item()
-    FP = (det & ~gt).sum().item()
-    FN = (~det & gt).sum().item()
+    det_xy = _nms(heat_pr, thresh, topk=topk)          # (N,2)
+    det_mask = torch.zeros_like(heat_gt.squeeze().bool())
+    if det_xy.numel():
+        ys, xs = det_xy.long().unbind(1)
+        det_mask[ys, xs] = True
+    gt_mask = (heat_gt.squeeze() > 0.5)
+    TP = (det_mask & gt_mask).sum().item()
+    FP = (det_mask & ~gt_mask).sum().item()
+    FN = (~det_mask & gt_mask).sum().item()
     P = TP / (TP + FP + 1e-6)
     R = TP / (TP + FN + 1e-6)
     return P, R
+
+
+

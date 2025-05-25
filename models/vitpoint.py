@@ -62,3 +62,21 @@ class SuperPointViT(nn.Module):
         if return_token:
             return heat, offset, desc, feat
         return heat, offset, desc
+
+    @torch.no_grad()
+    def sample_desc(self, pts_xy, desc_map, patch_size=14):
+        """
+        Bilinear-sample descriptors at sub-pixel coordinates.
+
+        pts_xy   : [N, 2] pixel coordinates in full-resolution image space
+        desc_map : [1,D,h,w]  output 'desc' from forward()
+        returns  : [N, D]  L2-normalised descriptors
+
+        # normalise to [-1,1] grid coords expected by grid_sample
+        """
+        D, h, w = desc_map.shape[1:]
+        xs = pts_xy[:, 0] / (w * patch_size - 1) * 2 - 1
+        ys = pts_xy[:, 1] / (h * patch_size - 1) * 2 - 1
+        grid = torch.stack([xs, ys], dim=-1).view(1, 1, -1, 2)     # [1,1,N,2]
+        desc = F.grid_sample(desc_map, grid, align_corners=True)   # [1,D,1,N]
+        return desc.squeeze().t()                                  # [N, D]

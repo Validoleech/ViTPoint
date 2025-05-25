@@ -7,9 +7,9 @@ Usage:
 """
 
 import argparse
-import time
 import yaml
 import torch
+import time
 import numpy as np
 import matplotlib.pyplot as plt
 import torchvision.transforms.functional as TF
@@ -52,11 +52,13 @@ def debug_overlay(model, sample, device, thr=0.5):
     Plot RGB image with GT (green) and prediction (red) masks.
     sample = (img, heat_gt, offset) as returned by dataset.
     """
+    starttime = time.time()
     img, heat_gt, _ = sample                                   # img [3,H,W]
     img = img.to(device)[None]                                 # [1,3,H,W]
 
     with torch.no_grad(), autocast(device_type=device.type, dtype=torch.float16):
         heat_pr, _, _ = model(img)                             # [1,1,h,w]
+    result_time = time.time() - starttime
 
     heat_pr = heat_pr[0, 0].cpu()
     heat_gt = heat_gt[0].cpu()
@@ -83,6 +85,7 @@ def debug_overlay(model, sample, device, thr=0.5):
     plt.imshow(rgba)
     plt.axis("off")
     plt.show()
+    return result_time
 
 
 def main():
@@ -113,7 +116,7 @@ def main():
     sample = ds_val[args.idx]
     print(f"[overlay] sample #{args.idx}  image shape {sample[0].shape}")
 
-    debug_overlay(model, sample, device, thr=args.thr)
+    print(f"in {debug_overlay(model, sample, device, thr=args.thr)}")
 
 
 if __name__ == "__main__":

@@ -13,10 +13,10 @@ from models.vitpoint import SuperPointViT, HeadConfig
 from datasets.synthetic_dataset import PersistentSyntheticShapes
 from datasets.utils.synthetic_dataset_config import PersistentSynthConfig
 from utils.loss import focal_bce, compute_val_loss, l1_offset, soft_nms_penalty
-from utils.eval import evaluate_detector_pr, val_step_stage01, pr_single_batch, sweep_best_thr
+from utils.eval import evaluate_detector_pr, val_step, pr_single_batch
 
 if __name__ == "__main__":
-
+    
     writer = SummaryWriter(log_dir="runs/stage0")
     global_step = 0
     
@@ -26,10 +26,6 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     cfg = yaml.safe_load(open("config.yaml"))
-    out_csv = f"data/stage0_metrics-{time.strftime("%Y%m%d-%H%M%S")}.csv"
-    with open(out_csv, "w", newline="") as f:
-        csv.writer(f).writerow(
-            ["epoch", "train_loss", "val_loss", "P", "R", "F1", "AP"])
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     amp_dtype = torch.bfloat16 if device.type == "cuda" else torch.float16
     
@@ -43,23 +39,20 @@ if __name__ == "__main__":
     val_loader = DataLoader(ds_val, batch_size=cfg["train"]["batch_size"],
                         num_workers=cfg["data"]["num_workers"], shuffle=True, pin_memory=True)
 
-    # tot_pos = 0
-    # for _, h in DataLoader(loader, batch_size=64):
-    #     tot_pos += h.sum().item()
-    # print("average positives / image", tot_pos/len(loader))
-
     # Model / Optimiser
     model = SuperPointViT(HeadConfig(cfg["model"]["dim_descriptor"]),
                         freeze_backbone=True).to(device)
     if cfg["model"].get("freeze_backbone_stage0", True):
         model.backbone.eval()
-    opt = torch.optim.AdamW(list(model.det_head.parameters()) +
+    opt = torch.optim.AdamW(list(model.fuse_conv.parameters()) +
+                            list(model.det_head.parameters()) +
+                            list(model.offset_head.parameters()) +
                             list(model.desc_head.parameters()),
                             lr=float(cfg["train"]["lr_heads"]))
     
     scaler = GradScaler()
     
-    if args.resume is not None:
+    if args.resume:
         ckpt = torch.load(args.resume, map_location=device)
         model.load_state_dict(ckpt['model'])
         opt.load_state_dict(ckpt['optim'])
@@ -68,7 +61,12 @@ if __name__ == "__main__":
     else:
         start_ep = 0
 
+    A = None #0.75
+    G = 2.5
+    L_NMS = 0.05
+    L_OFF = 2.0
     EPOCHS = args.epochs or cfg['train']['epochs_stage0']
+
     for ep in range(EPOCHS):
         model.train()
         running = 0
@@ -95,15 +93,15 @@ if __name__ == "__main__":
                     else:
                         ema_pos = 0.9 * ema_pos + 0.1 * pos
                         ema_neg = 0.9 * ema_neg + 0.1 * neg
-                    w_pos = (neg + 1e-6) / (pos + 1e-6)
-                    max_ratio = 5.0
-                    w_pos = torch.clamp(w_pos, max=max_ratio)
+                    # w_pos = (neg + 1e-6) / (pos + 1e-6)
+                    max_ratio = 5.0 # 5.0
+                    w_pos = torch.clamp(neg / pos, max=max_ratio)
                     w_neg = 1.0
-                    alpha = w_pos * heat + w_neg * (1 - heat) # alpha = 0.75
-                loss_det = focal_bce(heat_pr, heat, alpha=alpha, gamma=2.0) # gamma=2.0
+                    A = w_pos * heat + w_neg * (1 - heat)
+                loss_det = focal_bce(heat_pr, heat, alpha=A, gamma=G)
                 loss_off = l1_offset(off_pr, off, heat)
                 loss_nms = soft_nms_penalty(heat_pr)
-                loss = loss_det + 0.2*loss_nms + 2.0*loss_off
+                loss = loss_det + L_NMS*loss_nms + L_OFF*loss_off
             scaler.scale(loss).backward()
             scaler.step(opt)
             scaler.update()
@@ -128,7 +126,7 @@ if __name__ == "__main__":
             model.train()
         print(f"Epoch {ep} | Loss {running/len(loader):.4f}")
         metrics = evaluate_detector_pr(model, val_loader, device=device)
-        vloss = compute_val_loss(model, val_loader, val_step_stage01, device)
+        vloss = compute_val_loss(model, val_loader, val_step, device)
         print(f"  Val P:{metrics['P']:.3f} R:{metrics['R']:.3f} "
             f"F1:{metrics['F1']:.3f} AP:{metrics['AP']:.3f}  "
             f"loss:{vloss:.4f}")
@@ -137,12 +135,6 @@ if __name__ == "__main__":
             vloss,                        # val_loss
             metrics['P'], metrics['R'],
             metrics['F1'], metrics['AP']]
-        with open(out_csv, "a", newline="") as f:
-            csv.writer(f).writerow(row)
-        # best_t, best_F1, best_P, best_R = sweep_best_thr(model, val_loader, device)
-        # print(f"  best thr={best_t:.2f}: P={best_P:.3f} R={best_R:.3f}  F1={best_F1:.3f}")
-        # writer.add_scalar("val/best_F1", best_F1, ep)
-        # writer.add_scalar("val/best_thr", best_t,  ep)
         torch.save(model.state_dict(),
                    f"runs/stage0/checkpoint_stage0-{time.strftime("%Y%m%d-%H%M%S")}-epoch{ep}.pth")
     torch.save(model.state_dict(), f"checkpoint_stage0-{time.strftime("%Y%m%d-%H%M%S")}.pth")
