@@ -39,7 +39,7 @@ def ensure_orb(nfeatures: int, fast_thr: int):
         _orb = cv2.ORB_create(
             nfeatures=nfeatures, fastThreshold=fast_thr,
             scaleFactor=1.2, nlevels=8, edgeThreshold=31,
-            scoreType=cv2.ORB_HARRIS_SCORE, patchSize=31
+            scoreType=cv2.ORB_FAST_SCORE, patchSize=31
         )
     return _orb
 
@@ -109,7 +109,7 @@ if __name__ == "__main__":
         edgeThreshold=31,
         firstLevel=0,
         WTA_K=2,
-        scoreType=cv2.ORB_HARRIS_SCORE,
+        scoreType=cv2.ORB_FAST_SCORE,
         patchSize=31,
         fastThreshold=args.fast_thr,
         

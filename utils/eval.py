@@ -1,9 +1,11 @@
+from torch.cuda.amp import autocast
 import torch
 import numpy as np
 import torch.nn.functional as F
 import kornia as K
 from tqdm import tqdm
 from utils.loss import focal_bce, info_nce, _nms
+from utils.geometry import random_warp
 from torch.amp import autocast
 
 def sweep_best_thr(model, val_loader, device, n_steps=14, verbose=False):
@@ -198,19 +200,200 @@ def val_step_stage2(model, batch, device, amp_dtype=torch.bfloat16):
 
 
 def pr_single_batch(heat_pr, heat_gt, thresh=0.5, topk=256):
-    # NMS + threshold
-    det_xy = _nms(heat_pr, thresh, topk=topk)          # (N,2)
-    det_mask = torch.zeros_like(heat_gt.squeeze().bool())
+    assert heat_pr.shape[0] == heat_gt.shape[0] == 1, \
+        "Tensors of multiple images passed"
+    heat_pr = heat_pr[0]          # [1,h,w] or [h,w]
+    heat_gt = heat_gt[0]          # [1,h,w] or [h,w]
+    det_xy = _nms(heat_pr, thresh, topk)
+    det_mask = torch.zeros_like(heat_gt.squeeze().bool())  # [h,w]
     if det_xy.numel():
-        ys, xs = det_xy.long().unbind(1)
+        xs, ys = det_xy.long().unbind(1)
         det_mask[ys, xs] = True
+
     gt_mask = (heat_gt.squeeze() > 0.5)
+
     TP = (det_mask & gt_mask).sum().item()
     FP = (det_mask & ~gt_mask).sum().item()
     FN = (~det_mask & gt_mask).sum().item()
+
     P = TP / (TP + FP + 1e-6)
     R = TP / (TP + FN + 1e-6)
     return P, R
 
+def log_grad_norm(model, writer, tag, step):
+    norm = 0.0
+    for p in model.parameters():
+        if p.grad is not None:
+            norm += p.grad.norm().item()
+    writer.add_scalar(tag, norm, step)
 
 
+def calc_ap(model,
+                      loader,
+                      device,
+                      *,
+                      max_batches: int = 200,
+                      topk: int = 300,
+                      dist_thr: float = 3.0,
+                      heat_thr: float = 0.0):
+
+    def peaks_plus_offset(hm, offs, K=topk, thr=heat_thr):
+        """
+        hm   : (B,1,H,W)  logits
+        offs : (B,2,H,W)
+        Return: tuple(list[B], list[B])  -- coords [Ni,2] and scores [Ni]
+        """
+        B, _, H, W = hm.shape
+        flat = hm.view(B, -1)                       # (B,H*W)
+        if K > 0:
+            scores, idx = torch.topk(flat, K, dim=1)
+            mask = scores > thr
+            idx = idx[mask]
+            scores = scores[mask]
+        else:
+            mask = flat > thr
+            idx = mask.nonzero(as_tuple=False)      # (M,2)  [batch,row]
+            scores = flat[mask]
+
+        ys = (idx % (H*W) // W).float()
+        xs = (idx % (H*W) % W).float()
+        dx = offs[idx[:, 0], 0, ys.long(), xs.long()]
+        dy = offs[idx[:, 0], 1, ys.long(), xs.long()]
+        xs = xs + dx
+        ys = ys + dy
+        coords = torch.stack([xs, ys], 1)           # (N,2)
+
+        # split by batch
+        batch_ids = idx[:, 0]
+        pts_per_im = [[] for _ in range(B)]
+        scr_per_im = [[] for _ in range(B)]
+        for b, p, s in zip(batch_ids, coords, scores):
+            pts_per_im[b].append(p)
+            scr_per_im[b].append(s)
+
+        for b in range(B):
+            if len(pts_per_im[b]) == 0:
+                pts_per_im[b] = torch.empty(0, 2, device=hm.device)
+                scr_per_im[b] = torch.empty(0,   device=hm.device)
+            else:
+                pts_per_im[b] = torch.stack(pts_per_im[b], 0)
+                scr_per_im[b] = torch.stack(scr_per_im[b], 0)
+
+        return pts_per_im, scr_per_im
+
+    def repeatability_metrics(h0, off0, d0,
+                              h1, off1, d1,
+                              H, topk=topk,
+                              dist_thr=dist_thr):
+        B = h0.shape[0]
+        rep, desc_ap, loc_err, n_kp = 0., 0., 0., 0.
+
+        pts0, scr0 = peaks_plus_offset(h0, off0)
+        pts1, scr1 = peaks_plus_offset(h1, off1)
+
+        d0 = F.normalize(d0, p=2, dim=1)
+        d1 = F.normalize(d1, p=2, dim=1)
+
+        for b in range(B):
+            if pts0[b].numel() == 0 or pts1[b].numel() == 0:
+                continue
+
+            desc0 = F.grid_sample(d0[b:b+1],            # [1,C,H,W]
+                                  pts0[b].view(1, -1, 1, 2)      # [1,N,1,2]
+                                  .flip(-1) * 2 / torch.tensor(
+                                      [h0.shape[-1]-1,
+                                       h0.shape[-2]-1],
+                                      device=h0.device) - 1,
+                                  mode='bilinear', align_corners=True
+                                  ).squeeze()                     # (C,N)
+            desc1 = F.grid_sample(d1[b:b+1],
+                                  pts1[b].view(1, -1, 1, 2)
+                                  .flip(-1) * 2 / torch.tensor(
+                                      [h1.shape[-1]-1,
+                                       h1.shape[-2]-1],
+                                      device=h1.device) - 1,
+                                  mode='bilinear', align_corners=True
+                                  ).squeeze()                     # (C,M)
+
+            # ground-truth correspondence via homography
+            ones = torch.ones_like(pts0[b][:, :1])
+            pts0_h = torch.cat([pts0[b], ones], 1).t()           # [3,N]
+            proj = (H[b] @ pts0_h).t()                          # [N,3]
+            proj = proj[:, :2] / (proj[:, 2:3] + 1e-8)
+
+            dists = torch.cdist(proj, pts1[b], p=2)              # [N,M]
+            match = dists < dist_thr
+
+            # repeatability
+            n_rep = float(match.any(1).sum())
+            rep += n_rep / max(1e-6, float(pts0[b].shape[0]))
+
+            # localisation error
+            if n_rep > 0:
+                err = (dists * match.float()).sum() / n_rep
+                loc_err += err.item()
+
+            # descriptor AP (image-level)
+            if desc0.numel() and desc1.numel():
+                # cosine sim
+                sim = desc0.t() @ desc1                       # N×M
+                lbl = match.float()
+                ap_im = average_precision(sim.flatten(),
+                                          lbl.flatten())
+                desc_ap += ap_im
+
+            n_kp += 0.5 * (pts0[b].shape[0] + pts1[b].shape[0])
+
+        return (rep / B,
+                desc_ap / B,
+                loc_err / max(1e-6, rep * B),
+                n_kp / B)
+
+    def average_precision(scores, labels):
+        ord = torch.argsort(scores, descending=True)
+        labels = labels[ord]
+        cum_pos = torch.cumsum(labels, 0)
+        total_pos = labels.sum()
+        if total_pos == 0:
+            return 0.0
+        prec = cum_pos / torch.arange(1, labels.numel()+1,
+                                      device=labels.device)
+        ap = (prec * labels).sum() / total_pos
+        return ap.item()
+
+    rep_sum = ap_sum = err_sum = kp_sum = 0.0
+    n_batches = 0
+    model.eval()
+
+    with torch.no_grad():
+        for b_idx, (img, _, _) in enumerate(tqdm(loader,
+                                                 desc="val-quick",
+                                                 leave=False)):
+            if b_idx >= max_batches:
+                break
+            img = img.to(device, non_blocking=True)
+
+            from utils.geometry import random_warp
+            img_w, H = random_warp(img)
+            H = H.to(device)
+
+            with autocast(device_type=device.type,
+                          dtype=torch.bfloat16):
+                h0, off0, d0 = model(img)
+                h1, off1, d1 = model(img_w)
+
+            rep, ap, locerr, nkp = repeatability_metrics(
+                h0, off0, d0,
+                h1, off1, d1,
+                H)
+
+            rep_sum += rep
+            ap_sum += ap
+            err_sum += locerr
+            kp_sum += nkp
+            n_batches += 1
+
+    return dict(rep=rep_sum / n_batches,
+                desc_ap=ap_sum / n_batches,
+                loc_err=err_sum / n_batches,
+                num_kp= kp_sum  / n_batches)

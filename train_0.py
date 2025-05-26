@@ -1,8 +1,8 @@
-import csv
+import torchvision
 import yaml
-import os
 import torch
 import time
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 from torch.amp import GradScaler, autocast
@@ -12,7 +12,7 @@ from torch.utils.tensorboard import SummaryWriter
 from models.vitpoint import SuperPointViT, HeadConfig
 from datasets.synthetic_dataset import PersistentSyntheticShapes
 from datasets.utils.synthetic_dataset_config import PersistentSynthConfig
-from utils.loss import focal_bce, compute_val_loss, l1_offset, soft_nms_penalty
+from utils.loss import focal_bce, compute_val_loss, l1_offset, soft_nms_penalty, dice_loss
 from utils.eval import evaluate_detector_pr, val_step, pr_single_batch
 
 if __name__ == "__main__":
@@ -37,7 +37,7 @@ if __name__ == "__main__":
     loader = DataLoader(ds_train, batch_size=cfg["train"]["batch_size"],
                         num_workers=cfg["data"]["num_workers"], shuffle=True, pin_memory=True)
     val_loader = DataLoader(ds_val, batch_size=cfg["train"]["batch_size"],
-                        num_workers=cfg["data"]["num_workers"], shuffle=True, pin_memory=True)
+                        num_workers=cfg["data"]["num_workers"], shuffle=False, pin_memory=True)
 
     # Model / Optimiser
     model = SuperPointViT(HeadConfig(cfg["model"]["dim_descriptor"]),
@@ -65,6 +65,8 @@ if __name__ == "__main__":
     G = 2.5
     L_NMS = 0.05
     L_OFF = 2.0
+    L_DICE = 1.0
+    L_BCE = 1.5
     EPOCHS = args.epochs or cfg['train']['epochs_stage0']
 
     for ep in range(EPOCHS):
@@ -74,55 +76,61 @@ if __name__ == "__main__":
             w_before = model.det_head.weight.clone()
             img  = img.to(device, non_blocking=True)
             heat = heat.to(device, non_blocking=True)
-            assert heat.sum() > 0, "No positive pixels in the label!"
             off = off.to(device, non_blocking=True)
             opt.zero_grad()
             with autocast(device_type=device.type, dtype=amp_dtype):
                 heat_pr, off_pr, _ = model(img)
-                assert heat_pr.shape == heat.shape, \
-                    f"Shape mismatch   pred {heat_pr.shape}   gt {heat.shape}"
-                with torch.no_grad():
-                    pos = heat.sum()
-                    neg = heat.numel() - pos
-                    # # add epsilon to avoid 0/0
-                    # w_pos = neg / (pos + 1e-6)
-                    # w_neg = pos / (neg + 1e-6)
-                    if 'ema_pos' not in globals():
-                        ema_pos = pos
-                        ema_neg = neg
-                    else:
-                        ema_pos = 0.9 * ema_pos + 0.1 * pos
-                        ema_neg = 0.9 * ema_neg + 0.1 * neg
-                    # w_pos = (neg + 1e-6) / (pos + 1e-6)
-                    max_ratio = 5.0 # 5.0
-                    w_pos = torch.clamp(neg / pos, max=max_ratio)
-                    w_neg = 1.0
-                    A = w_pos * heat + w_neg * (1 - heat)
-                loss_det = focal_bce(heat_pr, heat, alpha=A, gamma=G)
+                loss_det = L_DICE * dice_loss(heat_pr, heat) + \
+                L_BCE * focal_bce(heat_pr, heat, gamma=G)
                 loss_off = l1_offset(off_pr, off, heat)
                 loss_nms = soft_nms_penalty(heat_pr)
                 loss = loss_det + L_NMS*loss_nms + L_OFF*loss_off
+                pos_fraction = (heat_pr > 0.5).float().mean()
+                writer.add_scalar("debug/pos_px_frac", pos_fraction, global_step)
             scaler.scale(loss).backward()
             scaler.step(opt)
             scaler.update()
+            model.eval()
             writer.add_scalar("train/loss_det",   loss_det.item(),  global_step)
             writer.add_scalar("train/loss_off",   loss_off.item(),  global_step)
             writer.add_scalar("train/loss_total", loss.item(),      global_step)
-            writer.add_scalar("debug/w_pos", w_pos,          global_step)
-            writer.add_scalar("debug/w_neg", w_neg,          global_step)
             global_step += 1
             running += loss.item()
-            if global_step % 1000 == 0:
+            if global_step % 600 == 0:
                 model.eval()
                 with torch.no_grad(), autocast(device_type=device.type, dtype=amp_dtype):
+                    # PR - F1
                     v_img, v_heat, v_off = next(iter(val_loader))
                     v_img = v_img.to(device)
                     v_heat = v_heat.to(device)
                     v_heat_pr, _, _ = model(v_img)
-                    P, R = pr_single_batch(v_heat_pr, v_heat)
+                    # gt_ratio = (v_heat > 0.5).float().mean().item()
+                    # print(f"GT pos-fraction = {gt_ratio:.4f}")
+                    P_sum = R_sum = 0
+                    for b in range(v_heat_pr.size(0)):
+                        P, R = pr_single_batch(v_heat_pr[b:b+1],  # [1,1,h,w]
+                                            v_heat[b:b+1])
+                        P_sum += P;  R_sum += R
+                    P = P_sum / v_heat_pr.size(0)
+                    R = R_sum / v_heat_pr.size(0)
+                    F1 = 2*P*R / (P+R+1e-6)
                     writer.add_scalar("val/P", P, global_step)
                     writer.add_scalar("val/R", R, global_step)
                     writer.add_scalar("val/F1", 2*P*R/(P+R+1e-6), global_step)
+                    ## VIS
+                    heat_gt = F.interpolate(
+                        v_heat,    size=v_img.shape[-2:], mode="nearest")
+                    heat_pred = F.interpolate(
+                        v_heat_pr, size=v_img.shape[-2:], mode="nearest")
+                    heat_gt = heat_gt.repeat(1, 3, 1, 1)        # 1→3 channels
+                    heat_pred = heat_pred.repeat(1, 3, 1, 1)
+                    vis = torch.cat([v_img.clamp(0, 1).cpu(),
+                                    heat_gt.cpu(),
+                                    heat_pred.cpu()], dim=0)
+                    writer.add_image('val/qualitative', torchvision.utils.make_grid(
+                        vis,nrow=v_img.size(0), normalize=True, scale_each=True), global_step)
+                    viz = torchvision.utils.make_grid(heat_pr[:8])
+                    writer.add_image('val/heatmap', viz, global_step)
             model.train()
         print(f"Epoch {ep} | Loss {running/len(loader):.4f}")
         metrics = evaluate_detector_pr(model, val_loader, device=device)
@@ -136,7 +144,7 @@ if __name__ == "__main__":
             metrics['P'], metrics['R'],
             metrics['F1'], metrics['AP']]
         torch.save(model.state_dict(),
-                   f"runs/stage0/checkpoint_stage0-{time.strftime("%Y%m%d-%H%M%S")}-epoch{ep}.pth")
+                   f"runs/stage0/checkpoint_stage1-{time.strftime("%Y%m%d-%H%M%S")}-epoch{ep}.pth")
     torch.save(model.state_dict(), f"checkpoint_stage0-{time.strftime("%Y%m%d-%H%M%S")}.pth")
     print(f"Stage-0 finished — saved to checkpoint_stage0-{time.strftime("%Y%m%d-%H%M%S")}.pth")
 

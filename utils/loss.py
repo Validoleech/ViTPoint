@@ -5,9 +5,6 @@ import cv2
 
 
 def focal_bce(logits, gt, alpha=0.25, gamma=2):
-    """
-    Focal loss on raw logits, AMP-safe.
-    """
     bce = F.binary_cross_entropy_with_logits(logits, gt, reduction='none')
     prob = torch.sigmoid(logits)
     pt = prob*gt + (1-prob)*(1-gt)
@@ -26,6 +23,20 @@ def info_nce(desc1, desc2, temp=0.07):
     logits = d1 @ d2.t() / temp                 # [N,N]
     labels = torch.arange(logits.size(0), device=logits.device)
     return F.cross_entropy(logits, labels)
+
+
+def dice_loss(pred, target, eps=1e-6):
+    assert pred.shape == target.shape
+    num = 2 * (pred * target).sum(dim=(2, 3))  # [B,1]
+    den = pred.sum(dim=(2, 3)) + target.sum(dim=(2, 3)) + eps
+    loss = 1 - (num + eps) / den
+    return loss.mean()
+
+
+def focal_dice(pred, target, gamma=2.5, eps=1e-6):
+    dice = dice_loss(pred, target, eps)
+    focal_weight = (1 - dice) ** gamma
+    return focal_weight * dice
 
 
 def _nms(heat, thr, topk):

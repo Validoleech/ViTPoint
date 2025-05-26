@@ -64,6 +64,16 @@ def _make_random_homographies(
 
     return H
 
+
+def _apply_homography(pts, H):
+    """
+    pts :  [B,3,N]  – homogeneous coordinates
+    H   :  [B,3,3]
+    """
+    warped = torch.bmm(H, pts)                             # [B,3,N]
+    warped = warped / (warped[:, 2:3, :] + 1e-8)           # z-normalise
+    return warped[:, :2, :]
+
 def random_warp(img: torch.Tensor,
                 d_deg:   float = 25.,
                 d_scale: float = 0.15,
@@ -101,3 +111,46 @@ def random_warp(img: torch.Tensor,
     )
 
     return (warped.squeeze(0) if single else warped, H_mat)
+
+
+def warp_offsets(offset_map: torch.Tensor,
+                 H: torch.Tensor) -> torch.Tensor:
+    """
+    Parameters
+    ----------
+    offset_map : torch.FloatTensor  (B, 2, H, W)
+        (dx,dy) ground-truth offsets defined in the *source* image.
+    H : torch.FloatTensor  (B, 3, 3)
+        Homography that transforms source → warped image.
+
+    Returns
+    -------
+    torch.FloatTensor  (B, 2, H, W)
+        Offsets expressed in the *warped* image frame, so they can be
+        supervised against the prediction h1/off1 coming from img_w.
+    """
+    B, _, Hh, Wh = offset_map.shape
+    device = offset_map.device
+
+    # --- build pixel grid ----------------------------------------------------
+    #   coords = (x,y) for the centre of every cell (same resolution as map)
+    y, x = torch.meshgrid(
+        torch.arange(Hh, device=device),
+        torch.arange(Wh, device=device),
+        indexing='ij'
+    )
+    coords = torch.stack((x, y), 0).float()                # (2,H,W)
+    coords = coords.unsqueeze(0).repeat(B, 1, 1, 1)        # (B,2,H,W)
+
+    # ------------------------------------------------------------------------
+    src_pts = coords + offset_map                      # (B,2,H,W)
+    src_pts_f = torch.cat((src_pts.view(B, 2, -1),
+                           torch.ones(B, 1, Hh*Wh, device=device)), 1)
+    coords_f = torch.cat((coords.view(B, 2, -1),
+                          torch.ones(B, 1, Hh*Wh, device=device)), 1)
+
+    dst_pts = _apply_homography(src_pts_f, H)             # (B,2,N)
+    dst_ctr = _apply_homography(coords_f,  H)             # (B,2,N)
+
+    warped_off = (dst_pts - dst_ctr).view(B, 2, Hh, Wh)    # (B,2,H,W)
+    return warped_off

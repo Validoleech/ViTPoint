@@ -80,6 +80,8 @@ class COCODataset(Dataset):
         off = torch.zeros((2, self.h, self.w), dtype=torch.float32)
 
         for (x, y) in kps:
+            x = float(x)
+            y = float(y)
             j, i = int(x // self.ps), int(y // self.ps)   # patch coords
             if 0 <= i < self.h and 0 <= j < self.w:
                 heat[0, i, j] = 1.0
