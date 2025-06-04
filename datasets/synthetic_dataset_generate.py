@@ -43,6 +43,26 @@ def gen_one(img: np.ndarray, primitive: str) -> np.ndarray:
     return getattr(sdu, fn_name)(img)
 
 
+def photometric(img: np.ndarray) -> None:
+    """Colour-jitter + Gaussian noise"""
+    lab = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+    lab = cv2.cvtColor(lab, cv2.COLOR_BGR2LAB).astype(np.float32)
+    L, A, B = cv2.split(lab)
+    L *= 0.8 + 0.4 * sdu.random_state.rand()
+    L += sdu.random_state.randn(*L.shape) * 5
+    A += sdu.random_state.randn(*A.shape) * 10
+    B += sdu.random_state.randn(*B.shape) * 10
+    lab = cv2.merge([np.clip(L, 0, 255),
+                     np.clip(A, 0, 255),
+                     np.clip(B, 0, 255)]).astype(np.uint8)
+    img[:] = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)[:, :, 0]
+    # Additive noise
+    sigma = sdu.random_state.uniform(3, 10)
+    img[:] = np.clip(img.astype(np.float32) +
+                     sdu.random_state.randn(*img.shape) * sigma,
+                     0, 255).astype(np.uint8)
+
+
 def generate_single_sample(prim: str, split: str, idx: int) -> None:
     """
     Generates a single synthetic data sample. This involves drawing a primitive,
@@ -62,12 +82,53 @@ def generate_single_sample(prim: str, split: str, idx: int) -> None:
     im_dir = base / prim / "images" / split
     pts_dir = base / prim / "points" / split
 
-    try:
-        big = sdu.generate_background(size=cfg.gen_img_size)
-        pts = gen_one(big, prim)
-    except Exception as e:
-        print(f"! {prim} sample {idx} failed: {e}")
-        pts = np.empty((0, 2), np.int32)
+    attempt = 0
+    while True:
+        try:
+            big = sdu.generate_background(size=cfg.gen_img_size)
+            pts = gen_one(big, prim)
+        except Exception as e:
+            print(f"! {prim} sample {idx} failed: {e}")
+            big = np.zeros(cfg.gen_img_size, np.uint8)
+            pts = np.empty((0, 2), np.int32)
+
+        if not cfg.hard_mode:
+            break
+
+        scale_x = cfg.resize[1] / cfg.gen_img_size[1]
+        scale_y = cfg.resize[0] / cfg.gen_img_size[0]
+        pts_scaled = pts.astype(float)
+        pts_scaled[:, 0] *= scale_x
+        pts_scaled[:, 1] *= scale_y
+
+        grid_h = cfg.resize[0] // cfg.patch_size
+        grid_w = cfg.resize[1] // cfg.patch_size
+        binc = np.zeros((grid_h, grid_w), int)
+
+        cols = (pts_scaled[:, 0] // cfg.patch_size).astype(int)
+        rows = (pts_scaled[:, 1] // cfg.patch_size).astype(int)
+        valid = (cols >= 0) & (cols < grid_w) & (rows >= 0) & (rows < grid_h)
+        np.add.at(binc, (rows[valid], cols[valid]), 1)
+        
+        if (binc >= cfg.min_kpts_per_patch).all():
+            break
+
+        # add dots in missing patches
+        missing = np.argwhere(binc < cfg.min_kpts_per_patch)
+        for r, c in missing:
+            cx_big = int((c + 0.5) * cfg.patch_size / scale_x)
+            cy_big = int((r + 0.5) * cfg.patch_size / scale_y)
+            rad = int(cfg.patch_size * 0.35 / scale_x)
+            cv2.circle(big, (cx_big, cy_big), rad,
+                       sdu.get_random_color(int(np.mean(big))), -1)
+            pts = np.vstack([pts, [cx_big, cy_big]])
+
+        attempt += 1
+        if attempt >= cfg.max_gen_attempts:
+            break
+
+    if cfg.hard_mode:
+        photometric(big)
 
     if cfg.blur % 2 == 1 and cfg.blur > 0:
         big = cv2.GaussianBlur(big, (cfg.blur, cfg.blur), 0)

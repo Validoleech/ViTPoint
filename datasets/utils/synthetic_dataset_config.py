@@ -15,6 +15,7 @@ class PersistentSynthConfig:
         "multiple_polygons",
         "ellipses",
         "star",
+        "multiple_stars",
         "checkerboard",
         "stripes",
         "cube",
@@ -29,4 +30,7 @@ class PersistentSynthConfig:
     resize: tuple = (224, 224)                  # net input
     patch_size: int = 14                        # ViT-S/14
     blur: int = 5                               # Gaussian blur (odd -> enabled)
+    hard: bool = True                           # denser generation
+    min_kpts_per_patch: int = 2                 # Points per patch_size²
+    max_gen_attempts: int = 6                   # Generation attempts
     random_seed: int = 0

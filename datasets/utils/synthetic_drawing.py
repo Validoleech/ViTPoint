@@ -1,3 +1,4 @@
+from datasets.utils.synthetic_dataset_config import PersistentSynthConfig
 import numpy as np
 import cv2 as cv
 import numpy
@@ -6,6 +7,7 @@ from typing import Tuple, List, Dict, Any, Union
 # Global variable to store the random state, allowing for reproducible results.
 random_state: Union[np.random.RandomState, None] = None
 
+cfg = PersistentSynthConfig()
 
 def set_random_state(state: np.random.RandomState) -> None:
     """Sets the global random state for reproducibility.
@@ -270,6 +272,9 @@ def draw_lines(img: np.ndarray, nb_min_lines: int = 30, nb_max_lines: int = 50) 
     if random_state is None:
         raise RuntimeError(
             "random_state not set. Call set_random_state first.")
+    if cfg.hard:
+        nb_min_lines *= 3
+        nb_max_lines *= 3
     num_lines: int = random_state.randint(nb_min_lines, nb_max_lines + 1)
     # Stores (x1, y1, x2, y2) for drawn lines
     segments: np.ndarray = np.empty((0, 4), dtype=np.int32)
@@ -426,6 +431,8 @@ def draw_multiple_polygons(img: np.ndarray, max_sides: int = 8, nb_polygons: int
     if random_state is None:
         raise RuntimeError(
             "random_state not set. Call set_random_state first.")
+    if cfg.hard:
+        nb_polygons *= 3
     # Stores segments of existing polygons (x1, y1, x2, y2)
     segments: np.ndarray = np.empty((0, 4), dtype=np.int32)
     # Stores centers of drawn polygons for overlap check
@@ -585,6 +592,8 @@ def draw_star(img: np.ndarray, nb_branches: int = 6) -> np.ndarray:
     if random_state is None:
         raise RuntimeError(
             "random_state not set. Call set_random_state first.")
+    if cfg.hard:
+        nb_branches *= 3
     num_branches: int = random_state.randint(3, nb_branches)
     min_dim: int = min(img.shape[0], img.shape[1])
     thickness: int = random_state.randint(
@@ -616,7 +625,47 @@ def draw_star(img: np.ndarray, nb_branches: int = 6) -> np.ndarray:
     return points
 
 
-def draw_checkerboard(img: np.ndarray, max_rows: int = 7, max_cols: int = 7,
+def draw_multiple_stars(img: np.ndarray, nb_stars: int = 25,
+                        max_branches: int = 8) -> np.ndarray:
+    """
+    Draw many star shapes (random number of branches, random size / colour).
+    Returns all branch-end points plus the centre of each star.
+    """
+    if random_state is None:
+        raise RuntimeError(
+            "random_state not set. Call set_random_state first.")
+    if cfg.hard:
+        nb_branches *= 3
+    min_dim = min(img.shape)
+    thickness_rng = (int(min_dim * 0.005), int(min_dim * 0.02))
+    background_color = int(np.mean(img))
+
+    all_pts = []
+    for _ in range(nb_stars):
+        # random geometry
+        num_br = random_state.randint(3, max_branches + 1)
+        rad = max(random_state.rand() * min_dim / 4, min_dim / 15)
+        cx = random_state.randint(int(rad), img.shape[1] - int(rad))
+        cy = random_state.randint(int(rad), img.shape[0] - int(rad))
+
+        slices = np.linspace(0, 2 * np.pi, num_br + 1)
+        angles = [slices[i] + random_state.rand() * (slices[i + 1] - slices[i])
+                  for i in range(num_br)]
+        tips = np.array([[int(cx + rad * np.cos(a)),
+                          int(cy + rad * np.sin(a))] for a in angles])
+        pts = np.vstack([[cx, cy], tips])
+
+        col = get_random_color(background_color)
+        thickness = random_state.randint(*thickness_rng)
+        for t in tips:
+            cv.line(img, (cx, cy), (t[0], t[1]), col, thickness)
+
+        all_pts.append(pts)
+
+    return np.vstack(all_pts) if all_pts else np.empty((0, 2), np.int32)
+
+
+def draw_checkerboard(img: np.ndarray, min_rows: int = 3, min_cols: int = 3, max_rows: int = 7, max_cols: int = 7,
                       transform_params: Tuple[float, float] = (0.05, 0.15)) -> np.ndarray:
     """Draws a distorted checkerboard pattern on an image and returns its corner points.
 
@@ -637,11 +686,16 @@ def draw_checkerboard(img: np.ndarray, max_rows: int = 7, max_cols: int = 7,
     if random_state is None:
         raise RuntimeError(
             "random_state not set. Call set_random_state first.")
+    if cfg.hard:
+        min_cols *= 2
+        max_rows *= 2
+        min_rows *= 2
+        max_cols *= 2
     background_color: int = int(np.mean(img))
 
     # Create the base grid of points (x, y)
-    rows: int = random_state.randint(3, max_rows)  # Number of rows
-    cols: int = random_state.randint(3, max_cols)  # Number of columns
+    rows: int = random_state.randint(min_rows, max_rows)  # Number of rows
+    cols: int = random_state.randint(min_cols, max_cols)  # Number of columns
     s: int = min((img.shape[1] - 1) // cols,
                  (img.shape[0] - 1) // rows)  # Size of a cell
     x_coord: np.ndarray = np.tile(
@@ -759,7 +813,7 @@ def draw_checkerboard(img: np.ndarray, max_rows: int = 7, max_cols: int = 7,
     return points
 
 
-def draw_stripes(img: np.ndarray, max_nb_cols: int = 13, min_width_ratio: float = 0.04,
+def draw_stripes(img: np.ndarray, min_nb_cols: int = 5, max_nb_cols: int = 13, min_width_ratio: float = 0.04,
                  transform_params: Tuple[float, float] = (0.05, 0.15)) -> np.ndarray:
     """Draws a series of distorted stripes on an image and returns their corner points.
 
@@ -780,11 +834,15 @@ def draw_stripes(img: np.ndarray, max_nb_cols: int = 13, min_width_ratio: float 
     if random_state is None:
         raise RuntimeError(
             "random_state not set. Call set_random_state first.")
+    if cfg.hard:
+        min_nb_cols *= 2
+        max_nb_cols *= 2
+        min_width_ratio /= 2
     background_color: int = int(np.mean(img))
 
     board_size: Tuple[int, int] = (int(img.shape[0] * (1 + random_state.rand())),
                                    int(img.shape[1] * (1 + random_state.rand())))
-    col_count: int = random_state.randint(5, max_nb_cols)
+    col_count: int = random_state.randint(min_nb_cols, max_nb_cols)
     cols_x_coords: np.ndarray = np.concatenate([board_size[1] * random_state.rand(col_count - 1),
                                                 np.array([0, board_size[1] - 1])], axis=0)
     cols_x_coords = np.unique(cols_x_coords.astype(int))
@@ -1019,6 +1077,9 @@ def draw_random_cubes(img: np.ndarray, n_min: int = 2, n_max: int = 4) -> np.nda
     Returns:
         A NumPy array of all visible corner points from the drawn cubes (N, 2).
     """
+    if cfg.hard:
+        n_min *= 3
+        n_max *= 3
     corners_all: List[np.ndarray] = []
     attempts: int = 0
     # Max attempts to avoid infinite loops
@@ -1036,9 +1097,6 @@ def draw_random_cubes(img: np.ndarray, n_min: int = 2, n_max: int = 4) -> np.nda
 
 def draw_gaussian_noise(img: np.ndarray) -> np.ndarray:
     """Applies uniform random noise (0-255) to an image.
-
-    This function uses `cv.randu`, which generates uniformly distributed random numbers.
-    The original docstring mentioned "Gaussian noise", which is inaccurate for `cv.randu`.
 
     Args:
         img: The input image as a NumPy array (modified in place).

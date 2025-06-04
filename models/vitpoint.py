@@ -10,6 +10,11 @@ import timm
 @dataclass
 class HeadConfig:
     dim_descriptor: int = 256
+    subgrid:        int = 1
+
+    @property
+    def n_cells(self) -> int:
+        return self.subgrid ** 2
 
 
 class SuperPointViT(nn.Module):
@@ -25,15 +30,32 @@ class SuperPointViT(nn.Module):
             img_size=(224, 224),
             num_classes=0,  # remove classifier
         )
-        self.backbone.set_grad_checkpointing(enable=True)
-        # 2. heads
+        self.backbone.set_grad_checkpointing(enable=False)
+        # heads
+        self.subgrid = head_cfg.subgrid
+        self.n_cells = head_cfg.n_cells
+
         hidden_dim = self.backbone.num_features  # 384
         self.fuse_conv = nn.Conv2d(hidden_dim*2, hidden_dim, 1)
         self._feat_mid = None  # grab tokens from an earlier block
         self.backbone.blocks[4].register_forward_hook(lambda _m, _in, out: setattr(self, '_feat_mid', out)) # CLS + tokens
-        self.det_head = nn.Conv2d(hidden_dim, 1, kernel_size=1)
-        self.offset_head = nn.Conv2d(hidden_dim, 2, kernel_size=1)
+        self.det_head = nn.Conv2d(hidden_dim, self.n_cells, kernel_size=1)
+        self.offset_head = nn.Conv2d(hidden_dim, 2 * self.n_cells, kernel_size=1)
         self.desc_head = nn.Conv2d(hidden_dim, head_cfg.dim_descriptor, 1)
+
+        anchor = []
+        if self.subgrid == 1:
+            anchor = [[0.0, 0.0]]
+        else:
+            step = 1.0 / self.subgrid # sub-path width
+            for r in range(self.subgrid):
+                for c in range(self.subgrid):
+                    ay = (r + 0.5) * step - 0.5
+                    ax = (c + 0.5) * step - 0.5
+                    anchor.append([ay, ax])
+        self.register_buffer(
+            "anchor_offsets",
+            torch.tensor(anchor).view(1, self.n_cells, 2, 1, 1)) # [1,M,2,1,1]
 
         if freeze_backbone:
             for p in self.backbone.parameters():
@@ -56,8 +78,22 @@ class SuperPointViT(nn.Module):
         hi = rearrange(tokens_hi[:, 1:],  'b (h w) c -> b c h w', h=gH, w=gW)
         lo = rearrange(tokens_mid[:, 1:], 'b (h w) c -> b c h w', h=gH, w=gW)
         feat = self.fuse_conv(torch.cat([hi, lo], dim=1))  # fuse early+late
-        heat = torch.sigmoid(self.det_head(feat))          # [B,1,h,w]
-        offset = torch.tanh(self.offset_head(feat)) * 0.5  # [B,2,h,w]
+        heat_multi = torch.sigmoid(self.det_head(feat)) # [B,M,h,w]
+        off_multi = torch.tanh(self.offset_head(feat)) # [B,2M,h,w]
+        off_multi = off_multi.view(B, self.n_cells, 2, gH, gW) # [B,M,2,h,w]
+        # scale refinement to the size of the sub-cell (Δ ∈ ±0.5/subgrid)
+        off_multi = off_multi * (0.5 / self.subgrid)
+        # add anchor so final offsets are again in (-0.5 … +0.5)
+        off_multi = off_multi + self.anchor_offsets # [B,M,2,h,w]
+        
+        if self.n_cells == 1:
+            heat = heat_multi
+            offset = off_multi.squeeze(1) # [B,2,h,w]
+        else:
+            heat, idx  = heat_multi.max(dim=1, keepdim=True) # idx: [B,1,h,w]
+            idx_exp = idx.unsqueeze(2).expand(-1, -1, 2, -1, -1)
+            offset = torch.gather(off_multi, 1, idx_exp).squeeze(1)
+
         desc = F.normalize(self.desc_head(feat), p=2, dim=1)
         if return_token:
             return heat, offset, desc, feat

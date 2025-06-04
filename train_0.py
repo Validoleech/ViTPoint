@@ -40,8 +40,10 @@ if __name__ == "__main__":
                         num_workers=cfg["data"]["num_workers"], shuffle=False, pin_memory=True)
 
     # Model / Optimiser
-    model = SuperPointViT(HeadConfig(cfg["model"]["dim_descriptor"]),
-                        freeze_backbone=True).to(device)
+    head_cfg = HeadConfig(
+        dim_descriptor=cfg["model"]["dim_descriptor"],
+        subgrid=cfg["model"]["subgrid"])
+    model = SuperPointViT(head_cfg, freeze_backbone=True).to(device)
     if cfg["model"].get("freeze_backbone_stage0", True):
         model.backbone.eval()
     opt = torch.optim.AdamW(list(model.fuse_conv.parameters()) +

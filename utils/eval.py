@@ -397,3 +397,67 @@ def calc_ap(model,
                 desc_ap=ap_sum / n_batches,
                 loc_err=err_sum / n_batches,
                 num_kp= kp_sum  / n_batches)
+
+
+def extract_keypoints(heat, offset, threshold=0.5, nms_radius=4):
+    """Extract keypoint coordinates from heatmap and offset"""
+    B, _, H, W = heat.shape
+    heat_sigmoid = torch.sigmoid(heat)
+
+    # Simple NMS
+    heat_max = F.max_pool2d(heat_sigmoid, kernel_size=nms_radius*2+1,
+                            stride=1, padding=nms_radius)
+    heat_nms = heat_sigmoid * (heat_sigmoid == heat_max).float()
+
+    keypoints = []
+    for b in range(B):
+        # Get coordinates above threshold
+        y, x = torch.where(heat_nms[b, 0] > threshold)
+        if len(y) == 0:
+            keypoints.append(torch.zeros((0, 2), device=heat.device))
+            continue
+
+        # Apply offset refinement
+        off_y = offset[b, 0, y, x]
+        off_x = offset[b, 1, y, x]
+
+        # Convert to pixel coordinates
+        kpts = torch.stack([x.float() + off_x, y.float() + off_y], dim=1)
+        keypoints.append(kpts)
+
+    return keypoints
+
+def repeatability_loss(heat_a, off_a, heat_b, off_b, H_ab):
+    """Compute repeatability loss between two views"""
+    kpts_a = extract_keypoints(heat_a, off_a)
+    
+    # Warp keypoints from A to B
+    losses = []
+    for i, kpts in enumerate(kpts_a):
+        if len(kpts) == 0:
+            losses.append(torch.tensor(0.0, device=heat_a.device))
+            continue
+            
+        # Convert to homogeneous coordinates
+        kpts_h = torch.cat([kpts, torch.ones(len(kpts), 1, device=kpts.device)], dim=1)
+        
+        # Apply homography
+        H = H_ab[i]
+        kpts_b_pred = torch.matmul(H, kpts_h.t()).t()
+        kpts_b_pred = kpts_b_pred[:, :2] / kpts_b_pred[:, 2:3]
+        
+        # Convert to grid coordinates
+        h, w = heat_b.shape[-2:]
+        grid_x = kpts_b_pred[:, 0] / (w - 1) * 2 - 1
+        grid_y = kpts_b_pred[:, 1] / (h - 1) * 2 - 1
+        grid = torch.stack([grid_x, grid_y], dim=-1).view(1, -1, 1, 2)
+        
+        # Sample heatmap at warped locations
+        heat_b_sigmoid = torch.sigmoid(heat_b[i:i+1])
+        sampled = F.grid_sample(heat_b_sigmoid, grid, align_corners=True)
+        
+        # Loss = 1 - average response at warped locations
+        loss = 1 - sampled.mean()
+        losses.append(loss)
+        
+    return torch.stack(losses).mean()

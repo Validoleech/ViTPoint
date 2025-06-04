@@ -6,6 +6,7 @@ train:
   lr_heads: 1e-4
 model:
   dim_descriptor: 256
+  subgrid: 2 # 2×2
   freeze_backbone_stage1: true
 data:
   img_size: [224, 224]    # H, W
@@ -13,6 +14,4 @@ data:
   synthetic_len: 30000
   synthetic_root: data/synthetic_shapes
   coco_root: data/train2017
-  num_workers: 8
-
-  
+  num_workers: 14

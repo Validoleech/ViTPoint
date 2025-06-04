@@ -7,14 +7,13 @@ from torch.utils.data import DataLoader
 from torch.amp import GradScaler, autocast
 from tqdm import tqdm
 from torch.utils.tensorboard import SummaryWriter
+from pathlib import Path
 
 from models.vitpoint import SuperPointViT, HeadConfig
 from datasets.coco_dataset import COCODataset
 from utils.geometry import random_warp, warp_offsets
-from utils.loss import focal_bce, l1_offset, soft_nms_penalty, compute_val_loss, infonce_loss, dice_loss
+from utils.loss import soft_nms_penalty, compute_val_loss, infonce_loss
 from utils.eval import evaluate_detector_pr, val_step_stage2, log_grad_norm, calc_ap
-
-import matplotlib
 
 if __name__ == "__main__":
 
@@ -22,13 +21,17 @@ if __name__ == "__main__":
     global_step = 0
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--ckpt_stage0", required=True)
+    parser.add_argument("--ckpt_stage0", required=None,
+                        help="Path to stage0 checkpoint. "
+                        "If omitted, backbone is initialized with vanilla DINOv2 weights.")
     parser.add_argument("--resume", type=str)
     parser.add_argument("--epochs", type=int)
     parser.add_argument("--accum_steps", type=int, default=1,
                         help="Number of mini-batches to accumulate before every "
                         "optimiser step (1 ⇒ no accumulation)")
     parser.add_argument("--val_interval", type=int, default=4)
+    parser.add_argument("--teacher", action="store_false",
+                        help="Use ORB keypoints for teaching.")
     args = parser.parse_args()
 
     cfg = yaml.safe_load(open("config.yaml"))
@@ -37,7 +40,7 @@ if __name__ == "__main__":
 
     ds_train = COCODataset("train2017",
                            coco_root="data/coco_processed/train2017/images",
-                           teacher_root="data/coco_processed/train2017/processed",
+                           teacher_root="data/coco_processed/train2017/processed" if args.teacher else None,
                            img_size=cfg["data"]["img_size"],
                            patch_size=cfg["data"]["patch_size"],
                            score_thr=0.1,
@@ -51,18 +54,21 @@ if __name__ == "__main__":
     val_loader = DataLoader(ds_val,   batch_size=cfg["train"]["batch_size"],
                             num_workers=cfg["data"]["num_workers"], shuffle=False, pin_memory=True)
 
-    # ─ model
-    model = SuperPointViT(HeadConfig(cfg["model"]["dim_descriptor"]),
-                          freeze_backbone=True).to(device)
+    head_cfg = HeadConfig(cfg["model"]["dim_descriptor"],
+               subgrid=cfg["model"]["subgrid"])
+    model = SuperPointViT(head_cfg, freeze_backbone=True).to(device)
     # unfreeze last 2 ViT blocks
     for blk in model.backbone.blocks[-2:]:
         for p in blk.parameters():
             p.requires_grad = True
 
     # load stage-0 weights
-    model.load_state_dict(torch.load(args.ckpt_stage0,
-                                     map_location="cuda:0"), strict=False)
-    print("Loaded stage-0 weights")
+    if args.ckpt_stage0 is not None and Path(args.ckpt_stage0).is_file():
+        model.load_state_dict(torch.load(args.ckpt_stage0,
+                                        map_location="cuda:0"), strict=False)
+        print(f"Loaded stage-0 weights from {args.ckpt_stage0}")
+    else:
+        print("Using vanilla DINOv2 weights as backbone")
 
 
     # optimiser
@@ -117,14 +123,14 @@ if __name__ == "__main__":
     for ep in range(start_ep, EPOCHS):
         model.train()
         running = 0.0
-        for img, heat, off in tqdm(loader, desc=f"E{ep}"):
+        for batch in tqdm(loader, desc=f"E{ep}"):
+            img, *_ = batch
             img = img.to(device, non_blocking=True)
-            heat = heat.to(device, non_blocking=True)
-            off = off.to(device, non_blocking=True)
+            # heat_gt = heat_gt.to(device, non_blocking=True)
+            # off_gt = off_gt.to(device, non_blocking=True)
+
             img_w, H = random_warp(img)  # img_w ∈ [0,1]
-    
             H = H.to(device)
-            off_w = warp_offsets(off, H)
 
             with autocast(device_type=device.type, dtype=amp_dtype):
                 h0, off0, d0 = model(img)
@@ -132,20 +138,13 @@ if __name__ == "__main__":
                 h1, off1, d1 = model(img_w)
                 d1 = F.normalize(d1, p=2, dim=1)
 
-                off_w = warp_offsets(off, H)
-
-                det0 = L_DICE * dice_loss(h0, heat) + \
-                    L_BCE * focal_bce(h0, heat, alpha=0.25, gamma=GAMMA)
-                det1 = L_DICE * dice_loss(h1, heat) + \
-                    L_BCE * focal_bce(h1, heat, alpha=0.25, gamma=GAMMA)
-                loss_det = (det0 + det1)
-
-                loss_off = (l1_offset(off0, off,    heat) +
-                                   l1_offset(off1, off_w,  heat))
-                loss_nms = (soft_nms_penalty(h0) + soft_nms_penalty(h1)) / 2
+                h0_warp = warp_offsets(h0, H)
+                off0_warp = warp_offsets(off0, H)
+                loss_cons_heat = F.l1_loss(h0_warp,   h1)   + F.l1_loss(warp_offsets(h1,   torch.linalg.inv(H)), h0)
+                loss_cons_off  = F.l1_loss(off0_warp, off1) + F.l1_loss(warp_offsets(off1, torch.linalg.inv(H)), off0)
                 loss_desc = L_DESC * infonce_loss(d0, d1, H)
-
-                loss = loss_det + L_OFF*loss_off + L_NMS*loss_nms + L_DESC*loss_desc
+                loss_nms= 0.5 * (soft_nms_penalty(h0) + soft_nms_penalty(h1))
+                loss = (L_CONS * (loss_cons_heat + L_OFF*loss_cons_off) + L_NMS  * loss_nms + L_DESC * loss_desc)
 
             scaler.scale(loss).backward()
 
@@ -163,11 +162,12 @@ if __name__ == "__main__":
             ema.update_parameters(model)
             
             global_step += 1
-            pos_frac = (h0.sigmoid() > 0.5).float().mean()
+            pos_frac = (h0 > 0.5).float().mean()
 
-            writer.add_scalar("train/loss_total",   loss.item(),            global_step)
-            writer.add_scalar("train/offset_L1",    loss_off.item(),         global_step)
-            writer.add_scalar("train/desc_InfoNCE", loss_desc.item(),        global_step)
+            writer.add_scalar("train/loss_total",       loss.item(),           global_step)
+            writer.add_scalar("train/consistency_heat", loss_cons_heat.item(), global_step)
+            writer.add_scalar("train/consistency_off",  loss_cons_off.item(),  global_step)
+            writer.add_scalar("train/desc_InfoNCE",     loss_desc.item(),      global_step)
             if global_step % 100 == 0:
                 writer.add_scalar("debug/pos_px_frac",  pos_frac,                global_step)
                 for i, pg in enumerate(opt.param_groups):

@@ -132,8 +132,7 @@ def warp_offsets(offset_map: torch.Tensor,
     B, _, Hh, Wh = offset_map.shape
     device = offset_map.device
 
-    # --- build pixel grid ----------------------------------------------------
-    #   coords = (x,y) for the centre of every cell (same resolution as map)
+    # coords = (x,y) for the centre of every cell (same resolution as map)
     y, x = torch.meshgrid(
         torch.arange(Hh, device=device),
         torch.arange(Wh, device=device),
@@ -142,7 +141,6 @@ def warp_offsets(offset_map: torch.Tensor,
     coords = torch.stack((x, y), 0).float()                # (2,H,W)
     coords = coords.unsqueeze(0).repeat(B, 1, 1, 1)        # (B,2,H,W)
 
-    # ------------------------------------------------------------------------
     src_pts = coords + offset_map                      # (B,2,H,W)
     src_pts_f = torch.cat((src_pts.view(B, 2, -1),
                            torch.ones(B, 1, Hh*Wh, device=device)), 1)
